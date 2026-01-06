@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -11,7 +10,7 @@ import (
 )
 
 type WeatherInput struct {
-	Location string `json:"location"`
+	Location string `json:"location" description:"The city name" required:"true"`
 }
 
 func main() {
@@ -21,16 +20,6 @@ func main() {
 	weatherTool := tool.New[WeatherInput]().
 		WithName("get_weather").
 		WithDescription("Get the weather in a location").
-		WithParameters(json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"location": {
-					"type": "string",
-					"description": "The city name"
-				}
-			},
-			"required": ["location"]
-		}`)).
 		WithExecute(func(input WeatherInput) (string, error) {
 			return fmt.Sprintf("The weather in %s is sunny, 22°C", input.Location), nil
 		})
