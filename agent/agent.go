@@ -1,31 +1,34 @@
 package agent
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 
 	"github.com/alexisbouchez/palm/provider"
+	"github.com/alexisbouchez/palm/stream"
 	"github.com/alexisbouchez/palm/tool"
 )
 
 type Agent interface {
 	WithProvider(provider provider.Provider) Agent
 	WithTool(tool tool.Callable) Agent
-	Run() error
+	WithStreamHandler(handler StreamHandler) Agent
+	Chat(message string, writer io.Writer) error
 }
 
 type agent struct {
-	provider provider.Provider
-	tools    []tool.Callable
+	provider       provider.Provider
+	tools          []tool.Callable
+	messages       []provider.Message
+	streamHandler  StreamHandler
 }
 
 func New() Agent {
-	return &agent{}
+	return &agent{
+		messages: []provider.Message{},
+	}
 }
 
 func (a *agent) WithProvider(provider provider.Provider) Agent {
@@ -38,73 +41,67 @@ func (a *agent) WithTool(tool tool.Callable) Agent {
 	return a
 }
 
-func (a *agent) Run() error {
+func (a *agent) WithStreamHandler(handler StreamHandler) Agent {
+	a.streamHandler = handler
+	return a
+}
+
+func (a *agent) Chat(message string, writer io.Writer) error {
 	if a.provider == nil {
 		return errors.New("provider undefined")
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	messages := []provider.Message{}
+	a.messages = append(a.messages, provider.Message{
+		Role:    "user",
+		Content: message,
+	})
+
 	providerTools := a.buildTools()
 
+	outputWriter := writer
+	if a.streamHandler != nil {
+		outputWriter = a.streamHandler
+	}
+
 	for {
-		fmt.Print("> ")
-		input, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
+		streamResult, err := a.provider.StreamChat(a.messages, providerTools, outputWriter)
 		if err != nil {
-			return fmt.Errorf("read input: %w", err)
+			return fmt.Errorf("stream chat: %w", err)
 		}
 
-		input = strings.TrimSpace(input)
-		if input == "" {
-			continue
+		assistantMsg := streamResult.Message
+		for i := range assistantMsg.ToolCalls {
+			if assistantMsg.ToolCalls[i].Type == "" {
+				assistantMsg.ToolCalls[i].Type = "function"
+			}
 		}
-		if input == "exit" || input == "quit" {
+		a.messages = append(a.messages, assistantMsg)
+
+		if len(assistantMsg.ToolCalls) == 0 {
 			break
 		}
 
-		messages = append(messages, provider.Message{
-			Role:    "user",
-			Content: input,
-		})
+		emitter := stream.NewEmitter(outputWriter)
+		for _, tc := range assistantMsg.ToolCalls {
+			result, err := a.executeTool(tc)
 
-		for {
-			resp, err := a.provider.Chat(messages, providerTools)
+			var outputData any
 			if err != nil {
-				return fmt.Errorf("chat: %w", err)
-			}
-
-			if len(resp.Choices) == 0 {
-				return errors.New("no choices in response")
-			}
-
-			assistantMsg := resp.Choices[0].Message
-			for i := range assistantMsg.ToolCalls {
-				if assistantMsg.ToolCalls[i].Type == "" {
-					assistantMsg.ToolCalls[i].Type = "function"
+				outputData = map[string]string{"error": err.Error()}
+				result = fmt.Sprintf("error: %v", err)
+			} else {
+				if err := json.Unmarshal([]byte(result), &outputData); err != nil {
+					outputData = map[string]string{"result": result}
 				}
 			}
-			messages = append(messages, assistantMsg)
 
-			if len(assistantMsg.ToolCalls) == 0 {
-				fmt.Println(assistantMsg.Content)
-				break
-			}
+			emitter.ToolOutputAvailable(tc.ID, outputData)
 
-			for _, tc := range assistantMsg.ToolCalls {
-				result, err := a.executeTool(tc)
-				if err != nil {
-					result = fmt.Sprintf("error: %v", err)
-				}
-
-				messages = append(messages, provider.Message{
-					Role:       "tool",
-					Content:    result,
-					ToolCallID: tc.ID,
-				})
-			}
+			a.messages = append(a.messages, provider.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
 		}
 	}
 

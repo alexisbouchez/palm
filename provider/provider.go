@@ -1,11 +1,21 @@
 package provider
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"io"
+)
 
 type Provider interface {
 	WithAPIKey(key string) Provider
 	WithModel(model string) Provider
+	WithBaseURL(url string) Provider
+
 	Chat(messages []Message, tools []Tool) (*ChatResponse, error)
+	StreamChat(messages []Message, tools []Tool, writer io.Writer) (*StreamResult, error)
+}
+
+type StreamResult struct {
+	Message Message
 }
 
 type Message struct {
